@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 from Environment import *
 from Model import *
 from tqdm import tqdm
-env = CarEnv()
+env = CarlaEnv()
 a = env.reset()
+b =env.step(1)
 print(a.shape)
+print(b[0].shape)
+env.reset()
