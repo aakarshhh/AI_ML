@@ -19,64 +19,42 @@ from tensorflow.python.keras.backend import  backend
 from threading import Thread
 from Environment import *
 class ModifiedTensorBoard(TensorBoard):
-
-    # Overriding init to set initial step and writer (we want one log file for all .fit() calls)
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.step = 1
         self.writer = tf.summary.create_file_writer(self.log_dir)
-
-    # Overriding this method to stop creating default log writer
     def set_model(self, model):
         pass
-
-    # Overrided, saves logs with our step number
-    # (otherwise every .fit() will start writing from 0th step)
     def on_epoch_end(self, epoch, logs=None):
         self.update_stats(**logs)
-
-    # Overrided
-    # We train for one batch only, no need to save anything at epoch end
     def on_batch_end(self, batch, logs=None):
         pass
-
-    # Overrided, so won't close writer
     def on_train_end(self, _):
         pass
 
-    # Custom method for saving own metrics
-    # Creates writer, writes custom metrics and closes writer
     def update_stats(self, reward_avg, reward_min, reward_max, epsilon,step):
         with self.writer.as_default():
-            
             tf.summary.scalar("reward_avg", reward_avg,step=step)
             tf.summary.scalar("reward_min", reward_min,step=step)
             tf.summary.scalar("reward_max", reward_max,step=step)
             tf.summary.scalar("epsilon", epsilon,step=step)
-        self.writer.flush()
-        
-        
-class DQNAgent:
+            self.writer.flush()
+                
+class DDQNAgent:
     def __init__(self):
-        REPLAY_MEMORY_SIZE = 2048
-        MINIBATCH_SIZE = 256
-        PREDICTION_BATCH_SIZE = 1
-        TRAINING_BATCH_SIZE = 16
-        UPDATE_TARGET_EVERY = 5
-        MIN_REWARD = -1
-        
-        DISCOUNT = 0.9875
-        MIN_REPLAY_MEMORY_SIZE = 1024
-        first_time = True 
-
+        rep_mem_size = 1024
+        mb_size = 128        
+        D = 0.9875
+        MIN_rep_mem_size = 256
+        first_time = False 
         if first_time:
             self.model = self.create_model()
         else :
-            self.model = load_model('models/cndrl.model')
+            self.model = load_model('models/cnddql.model')
         self.target_model = self.create_model()
         self.target_model.set_weights(self.model.get_weights())
-        self.replay_memory = deque(maxlen=REPLAY_MEMORY_SIZE)
-        self.tensorboard = ModifiedTensorBoard(log_dir=f"logs/cndrl-{int(time.time())}")
+        self.replay_memory = deque(maxlen=rep_mem_size)
+        self.tensorboard = ModifiedTensorBoard(log_dir=f"logs/cnddql-{int(time.time())}")
         self.target_update_counter = 0
         self.alpha = 0.001
         self.terminate = False
@@ -87,7 +65,7 @@ class DQNAgent:
         IM_WIDTH = 640
         IM_HEIGHT = 480
         model = Sequential()
-        model.add(Conv2D(64, (5, 5), input_shape=(480, 640,3), padding='same',data_format='channels_last'))
+        model.add(Conv2D(64, (5, 5), input_shape=(480 , 640 , 4), padding='same'))
         model.add(Activation('relu'))
         model.add(MaxPooling2D())
         model.add(BatchNormalization())
@@ -107,49 +85,50 @@ class DQNAgent:
         model.add(Flatten())
         model.add(Dense(16))
         model.add(tf.keras.layers.Dropout(.2))
-        model.add(Dense(8))
+        model.add(Dense(8, activation="linear" ))
         model.compile(loss="mse", optimizer=Adam(), metrics=["accuracy"])
         return model
     def update_replay_memory(self, transition):
         self.replay_memory.append(transition)
     def train(self):
         oq = pd.read_csv('q_value.csv')
-        if len(self.replay_memory) < MIN_REPLAY_MEMORY_SIZE :
+        if len(self.replay_memory) < MIN_rep_mem_size :
             return
-        minibatch = random.sample(self.replay_memory, MINIBATCH_SIZE)
+        minibatch = random.sample(self.replay_memory, mb_size)
         current_states = np.array([transition[0] for transition in minibatch])/255
         
-        current_qs_list = self.model.predict(current_states, PREDICTION_BATCH_SIZE)
+        current_qs_list = self.model.predict(current_states, 1)
         new_current_states = np.array([transition[3] for transition in minibatch])/255
         
-        future_qs_list = self.target_model.predict(new_current_states, PREDICTION_BATCH_SIZE)
+        future_qs_list = self.target_model.predict(new_current_states, 1)
         x = []
         y = []
-        for index, (current_state, action, reward, new_state, done) in enumerate(minibatch):             
+        for index, (current_state, action, reward, new_state, done) in enumerate(minibatch):
+            
             max_future_q = np.max(future_qs_list[index])
-            oq[f'{action}'] = (1-self.alpha)*oq[f'{action}']+ self.alpha*(reward + DISCOUNT * max_future_q)
+            oq[f'{action}'] = (1-self.alpha)*oq[f'{action}']+ self.alpha*(reward + D*max_future_q)
             current_qs = current_qs_list[index]
             current_qs[action] = oq[f'{action}']
             x.append(current_state)
             y.append(current_qs)
-
+            print(oq)
         log_this_step = False
         oq.to_csv('q_value.csv',index = False)
         if self.tensorboard.step > self.last_logged_episode:
             log_this_step = True
             self.last_log_episode = self.tensorboard.step
 
-        self.model.fit(np.array(x)/255, np.array(y), batch_size=TRAINING_BATCH_SIZE, verbose=0 , shuffle=False, callbacks=[self.tensorboard] if log_this_step else None)
+        self.model.fit(np.array(x), np.array(y), batch_size=4, verbose=0 , shuffle=False, callbacks=[self.tensorboard] if log_this_step else None)
 
         if log_this_step:
             self.target_update_counter += 1
 
-        if self.target_update_counter > UPDATE_TARGET_EVERY:
+        if self.target_update_counter > 5:
             self.target_model.set_weights(self.model.get_weights())
             self.target_update_counter = 0
 
     def get_qs(self, state):
-        return self.model.predict(np.array(state))/255)
+        return self.model.predict(np.array(state).reshape(-1, state.shape[0], state.shape[1], state.shape[2])/255)
 
     def train_in_loop(self):
         self.training_initialized = True
@@ -158,5 +137,6 @@ class DQNAgent:
                 return
             self.train()
             time.sleep(0.01)
+        #self.tensorboard --logdir= logs/
         
 

@@ -12,7 +12,8 @@ from Model import *
 from tqdm import tqdm
 env = CarlaEnv()
 a = env.reset()
+time.sleep(5)
 b =env.step(1)
 print(a.shape)
 print(b[0].shape)
-env.reset()
+
